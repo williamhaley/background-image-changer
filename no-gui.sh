@@ -10,7 +10,9 @@ go clean
 go get -d
 go install
 
+# No GUI
 go build \
+	-ldflags -H=windowsgui \
 	-o $GOBIN/background-image-changer.exe \
 	background-image-changer.go
 
