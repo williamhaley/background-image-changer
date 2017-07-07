@@ -1,0 +1,10 @@
+{
+	"directories": [
+		"E:\\wallpaper-changer"
+	],
+	"extensions": [
+		"jpg", "gif", "bmp", "png"
+	],
+	"wait": 5
+}
+

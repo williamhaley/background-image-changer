@@ -3,8 +3,11 @@ package main
 import (
 	"golang.org/x/sys/windows/registry"
 
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,53 +24,80 @@ const (
 	FileFormat = `(?i:\Q.\E%v$)`
 )
 
-var ValidExtensions []string = []string{ "gif", "jpg", "bmp" }
-var TmpFilePath string = os.TempDir() + "/wallpapers.tmp"
-
-var (
-	regex *regexp.Regexp
-)
-
-func main() {
-	getWallpapers()
-
-	setWallpaperStyle()
-
-	path := `C:\Users\Family\Desktop\774.jpg`
-	setWallpaper(path)
+type Config struct {
+	Directories []string `json:"directories"`
+	Extensions []string `json:"extensions"`
+	Wait time.Duration `json:"wait"`
 }
 
-func WallpaperRegex() *regexp.Regexp {
-	if regex != nil {
-		return regex
+func main() {
+	var config *Config
+	var regex *regexp.Regexp
+
+	var tmpFilePath string = os.TempDir() + "/background-images.tmp"
+
+	config = loadConfig(tmpFilePath)
+	regex = imageRegex(config.Extensions)
+
+	buildImageList(config.Directories, tmpFilePath, regex)
+	setWallpaperStyle()
+	run(config.Wait * time.Second, tmpFilePath)
+}
+
+func run(wait time.Duration, tmpFilePath string) {
+	var path string
+
+	for {
+		path = getRandomImage(tmpFilePath)
+		setBackgroundImage(path)
+		time.Sleep(wait)
+	}
+}
+
+func loadConfig(tmpFilePath string) *Config {
+	var bytes []byte
+	var err error
+
+	if bytes, err = ioutil.ReadFile("background-image-changer.config.json"); err != nil {
+		panic(err)
 	}
 
-	regexExtensions := []string{}
+	var config Config
+	if err = json.Unmarshal(bytes, &config); err != nil {
+		panic(err)
+	}
 
-	for _, extension := range ValidExtensions {
-		log.Println("Extension:", extension)
+	err = os.Remove(tmpFilePath)
+	if err != nil && !os.IsNotExist(err) {
+		panic(err)
+	}
+
+	return &config
+}
+
+func imageRegex(extensions []string) *regexp.Regexp {
+	var regexExtensions []string
+
+	for _, extension := range extensions {
 		regexExtensions = append(
 			regexExtensions,
 			fmt.Sprintf(FileFormat, extension),
 		)
 	}
 
-	regex = regexp.MustCompile(strings.Join(regexExtensions, "|"))
-
-	return regex
+	return regexp.MustCompile(strings.Join(regexExtensions, "|"))
 }
 
-func getWallpapers() {
+func buildImageList(directories []string, tmpFilePath string, regex *regexp.Regexp) {
 	var tmpFile *os.File
 	var err error
 
-	tmpFile, err = os.Create(TmpFilePath)
+	tmpFile, err = os.Create(tmpFilePath)
 	defer tmpFile.Close()
 	if err != nil {
 		log.Panic(err)
 	}
 
-	directories := []string{ `C:\Users\Family\Pictures` }
 	for _, directory := range directories {
 		log.Println("Scanning:", directory)
 
@@ -82,16 +112,20 @@ func getWallpapers() {
 		// https://stackoverflow.com/questions/30693421/how-to-read-specific-line-of-file
 		filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
 			//log.Println("Path:", path)
-			if matched := WallpaperRegex().MatchString(path); matched {
-				atime, mtime, ctime, err := statTimes(path)
-				fmt.Println(atime, mtime, ctime)
-				tmpFile.WriteString(path + "\n")
+			if matched := regex.MatchString(path); matched {
+				//atime, mtime, ctime, err := statTimes(path)
+				//fmt.Println(atime, mtime, ctime)
+				tmpFile.WriteString(path + "|")
 			}
 			return nil
 		})
 	}
+
+	tmpFile.Sync()
 }
 
+
+/*
 func statTimes(name string) (atime, mtime, ctime time.Time, err error) {
     fi, err := os.Stat(name)
     if err != nil {
@@ -103,6 +137,7 @@ func statTimes(name string) (atime, mtime, ctime time.Time, err error) {
     ctime = time.Unix(int64(stat.Ctim.Sec), int64(stat.Ctim.Nsec))
     return
 }
+*/
 
 func setWallpaperStyle() {
 	var err error
@@ -125,7 +160,7 @@ func setWallpaperStyle() {
 	}
 }
 
-func setWallpaper(path string) {
+func setBackgroundImage(path string) {
 	pathp, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		log.Fatal(err)
@@ -154,3 +189,56 @@ func setWallpaper(path string) {
 		panic("Error calling SystemParametersInfo: " + err.Error())
 	}
 }
+
+func getRandomImage(tmpFilePath string) string {
+	file, err := os.Open(tmpFilePath)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		panic(err)
+	}
+
+	offset := rand.Int63n(info.Size())
+	foundPipe := false
+	data := make([]byte, 1)
+	path := ""
+
+	for offset < info.Size() {
+		_, err := file.ReadAt(data, offset)
+		if err != nil {
+			log.Fatal(err)
+			continue
+		}
+		// log.Printf("read %d bytes: %q\n", count, data[0])
+
+		char := byte(data[0])
+
+		// Second time we're seeing a pipe, so we're done.
+		if char == '|' && foundPipe {
+			break
+		}
+
+		// We're in the midst of a hit. Append the data.
+		if foundPipe {
+			path += string(char)
+		}
+
+		// First time seeing a pipe. Start tracking chars.
+		if char == '|' {
+			foundPipe = true
+		}
+
+		offset++
+		if offset >= info.Size()-1 {
+			offset = 0
+			path = ""
+		}
+	}
+
+	return path
+}
+
